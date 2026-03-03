@@ -9,8 +9,9 @@ terraform {
   }
 }
 
-# Secure S3 bucket (demo - non-proprietary)
-
+############################################
+# 1) MAIN BUCKET
+############################################
 resource "aws_s3_bucket" "this" {
   bucket = var.bucket_name
 }
@@ -23,7 +24,10 @@ resource "aws_s3_bucket_public_access_block" "this" {
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
-# --- Logging bucket ---
+
+############################################
+# 2) LOG BUCKET (same region)
+############################################
 resource "aws_s3_bucket" "log_bucket" {
   bucket = "${var.bucket_name}-logs"
 }
@@ -35,9 +39,22 @@ resource "aws_s3_bucket_public_access_block" "log_bucket" {
   ignore_public_acls      = true
   restrict_public_buckets = true
 }
-# ==========================================
-# PUT LOG BUCKET ENCRYPTION RIGHT HERE
-# ==========================================
+
+############################################
+# 3) KMS ENCRYPTION (both buckets)
+############################################
+resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
+  bucket = aws_s3_bucket.this.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = var.kms_key_arn
+    }
+
+    bucket_key_enabled = true
+  }
+}
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "log_bucket" {
   bucket = aws_s3_bucket.log_bucket.id
@@ -52,7 +69,9 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "log_bucket" {
   }
 }
 
-# Enable versioning
+############################################
+# 4) VERSIONING (both buckets)
+############################################
 resource "aws_s3_bucket_versioning" "this" {
   bucket = aws_s3_bucket.this.id
 
@@ -60,7 +79,18 @@ resource "aws_s3_bucket_versioning" "this" {
     status = "Enabled"
   }
 }
-# --- Lifecycle configuration ---
+
+resource "aws_s3_bucket_versioning" "log_bucket" {
+  bucket = aws_s3_bucket.log_bucket.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+############################################
+# 5) LIFECYCLE (both buckets)
+############################################
 resource "aws_s3_bucket_lifecycle_configuration" "this" {
   bucket = aws_s3_bucket.this.id
 
@@ -76,11 +106,92 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
       noncurrent_days = 365
     }
   }
+
+  depends_on = [aws_s3_bucket_versioning.this]
 }
 
-# --- Access logging ---
+resource "aws_s3_bucket_lifecycle_configuration" "log_bucket" {
+  bucket = aws_s3_bucket.log_bucket.id
+
+  rule {
+    id     = "log-retention"
+    status = "Enabled"
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    expiration {
+      days = 365
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.log_bucket]
+}
+
+############################################
+# 6) ACCESS LOGGING (main -> log bucket)
+############################################
 resource "aws_s3_bucket_logging" "this" {
   bucket        = aws_s3_bucket.this.id
   target_bucket = aws_s3_bucket.log_bucket.id
-  target_prefix = "s3-access-logs/"
+  target_prefix = "s3-access-logs/${var.bucket_name}/"
+}
+
+############################################
+# 7) EVENT NOTIFICATIONS (SNS topic)
+############################################
+resource "aws_sns_topic" "s3_events" {
+  name = "${var.bucket_name}-s3-events"
+}
+
+data "aws_iam_policy_document" "sns_topic_policy" {
+  statement {
+    sid    = "AllowS3Publish"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["s3.amazonaws.com"]
+    }
+
+    actions   = ["SNS:Publish"]
+    resources = [aws_sns_topic.s3_events.arn]
+
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values = [
+        aws_s3_bucket.this.arn,
+        aws_s3_bucket.log_bucket.arn
+      ]
+    }
+  }
+}
+
+resource "aws_sns_topic_policy" "s3_events" {
+  arn    = aws_sns_topic.s3_events.arn
+  policy = data.aws_iam_policy_document.sns_topic_policy.json
+}
+
+resource "aws_s3_bucket_notification" "this" {
+  bucket = aws_s3_bucket.this.id
+
+  topic {
+    topic_arn = aws_sns_topic.s3_events.arn
+    events    = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
+  }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
+}
+
+resource "aws_s3_bucket_notification" "log_bucket" {
+  bucket = aws_s3_bucket.log_bucket.id
+
+  topic {
+    topic_arn = aws_sns_topic.s3_events.arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+
+  depends_on = [aws_sns_topic_policy.s3_events]
 }
