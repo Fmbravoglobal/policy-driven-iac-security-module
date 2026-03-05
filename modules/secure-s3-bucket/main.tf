@@ -197,7 +197,6 @@ resource "aws_s3_bucket_notification" "log_bucket" {
   depends_on = [aws_sns_topic_policy.s3_events]
 }
 
-}
 
 ############################################
 # S3 CROSS REGION REPLICATION
