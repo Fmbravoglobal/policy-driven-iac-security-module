@@ -142,7 +142,8 @@ resource "aws_s3_bucket_logging" "this" {
 # 7) EVENT NOTIFICATIONS (SNS topic)
 ############################################
 resource "aws_sns_topic" "s3_events" {
-  name = "${var.bucket_name}-s3-events"
+  name              = "${var.bucket_name}-s3-events"
+  kms_master_key_id = var.kms_key_arn
 }
 
 data "aws_iam_policy_document" "sns_topic_policy" {
@@ -194,4 +195,68 @@ resource "aws_s3_bucket_notification" "log_bucket" {
   }
 
   depends_on = [aws_sns_topic_policy.s3_events]
+}
+
+}
+
+############################################
+# S3 CROSS REGION REPLICATION
+############################################
+
+resource "aws_s3_bucket_replication_configuration" "this" {
+  bucket = aws_s3_bucket.this.id
+  role   = aws_iam_role.replication.arn
+
+  depends_on = [
+    aws_s3_bucket_versioning.this,
+    aws_s3_bucket_versioning.replica
+  ]
+
+  rule {
+    id     = "replicate-main"
+    status = "Enabled"
+
+    source_selection_criteria {
+      sse_kms_encrypted_objects {
+        status = "Enabled"
+      }
+    }
+
+    destination {
+      bucket = aws_s3_bucket.replica.arn
+
+      encryption_configuration {
+        replica_kms_key_id = var.replica_kms_key_arn
+      }
+    }
+  }
+}
+
+resource "aws_s3_bucket_replication_configuration" "log_bucket" {
+  bucket = aws_s3_bucket.log_bucket.id
+  role   = aws_iam_role.replication.arn
+
+  depends_on = [
+    aws_s3_bucket_versioning.log_bucket,
+    aws_s3_bucket_versioning.log_replica
+  ]
+
+  rule {
+    id     = "replicate-logs"
+    status = "Enabled"
+
+    source_selection_criteria {
+      sse_kms_encrypted_objects {
+        status = "Enabled"
+      }
+    }
+
+    destination {
+      bucket = aws_s3_bucket.log_replica.arn
+
+      encryption_configuration {
+        replica_kms_key_id = var.replica_kms_key_arn
+      }
+    }
+  }
 }
